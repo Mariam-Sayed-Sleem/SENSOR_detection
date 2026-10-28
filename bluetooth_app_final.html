@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ESP32 Sensor</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 12px;
+            font-family: Arial, sans-serif;
+            background: #300510;
+            color: #f5d9a9;
+            font-size: 16px;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 420px;
+            margin: auto;
+        }
+
+        h1 {
+            font-size: 24px;
+            margin: 8px 0;
+        }
+
+        h2 {
+            font-size: 18px;
+            margin-top: 0;
+        }
+
+        p {
+            color: #d4a574;
+            font-size: 14px;
+        }
+
+        .status, .card {
+            border: 1px solid #5d1d3d;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 12px 0;
+            background: #4a0e2e;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .status-info {
+            min-width: 0;
+        }
+
+        #statusText {
+            font-weight: bold;
+        }
+
+        #deviceName {
+            overflow-wrap: anywhere;
+            font-size: 12px;
+            color: #d4a574;
+            margin-top: 4px;
+        }
+
+        button {
+            width: 100%;
+            padding: 14px;
+            margin-top: 8px;
+            border: 1px solid #5d1d3d;
+            border-radius: 6px;
+            background: #5d1d3d;
+            color: #f5d9a9;
+            font-size: 16px;
+            cursor: pointer;
+            touch-action: manipulation;
+        }
+
+        button:active {
+            background: #7a2950;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+        }
+
+        .connect-btn {
+            width: auto;
+            min-width: 95px;
+            margin: 0;
+            background: #8b3a5d;
+            color: #f5d9a9;
+            border-color: #8b3a5d;
+        }
+
+        .value {
+            font-size: 36px;
+            font-weight: bold;
+            margin: 12px 0;
+        }
+
+        .unit {
+            font-size: 16px;
+            font-weight: normal;
+            color: #d4a574;
+        }
+
+        .data {
+            background: #5d1d3d;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 14px;
+            line-height: 1.8;
+            color: #f5d9a9;
+        }
+
+        .button-group {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        #console {
+            background: #5d1d3d;
+            border: 1px solid #5d1d3d;
+            border-radius: 5px;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            overflow-wrap: anywhere;
+            max-height: 160px;
+            overflow-y: auto;
+            color: #f5d9a9;
+        }
+
+        .error {
+            display: none;
+            color: #ff6b6b;
+            background: #5d1d3d;
+            padding: 10px;
+            border-radius: 5px;
+            overflow-wrap: anywhere;
+            border: 1px solid #8b3a5d;
+        }
+
+        .error.show {
+            display: block;
+        }
+
+        .timestamp {
+            text-align: center;
+            color: #a68060;
+            font-size: 12px;
+            padding: 12px 0;
+        }
+    </style>
+</head>
+
+<body>
+<div class="container">
+
+    <h1>ESP32 Sensor</h1>
+    <p>Bluetooth · MQ135 · HX711</p>
+
+    <div id="errorMsg" class="error"></div>
+
+    <div class="status">
+        <div class="status-info">
+            <div id="statusText">Disconnected</div>
+            <div id="deviceName"></div>
+        </div>
+        <button class="connect-btn" id="connectBtn"
+                onclick="connectBluetooth()">Connect</button>
+    </div>
+
+    <section class="card">
+        <h2>Gas Sensor (MQ135)</h2>
+
+        <div class="value">
+            <span id="mq135Value">--</span>
+            <span class="unit">%</span>
+        </div>
+
+        <div class="data" id="mq135Data">
+            Raw ADC: --<br>
+            Voltage: -- V<br>
+            Percent: --%
+        </div>
+
+        <button onclick="sendCommand('READ')">Read Sensors</button>
+    </section>
+
+    <section class="card">
+        <h2>Weight Sensor (HX711)</h2>
+
+        <div class="value">
+            <span id="hx711Value">--</span>
+            <span class="unit">g</span>
+        </div>
+
+        <div class="button-group">
+            <button onclick="sendCommand('TARE')">Zero Weight</button>
+            <button onclick="sendCommand('STATUS')">Status</button>
+        </div>
+
+        <button onclick="sendCommand('HELP')">Help</button>
+    </section>
+
+    <section class="card">
+        <h2>Console</h2>
+        <div id="console"></div>
+        <button onclick="clearConsole()">Clear Console</button>
+    </section>
+
+    <div class="timestamp" id="timestamp"></div>
+</div>
+
+<script>
+    let characteristic = null;
+    let device = null;
+
+    function log(message) {
+        const output = document.getElementById('console');
+        const line = document.createElement('div');
+
+        line.textContent = '> ' + message;
+        output.appendChild(line);
+
+        // Keep the console from growing indefinitely.
+        while (output.children.length > 50) {
+            output.removeChild(output.firstChild);
+        }
+
+        output.scrollTop = output.scrollHeight;
+    }
+
+    function clearConsole() {
+        document.getElementById('console').innerHTML = '';
+    }
+
+    function showError(message) {
+        const error = document.getElementById('errorMsg');
+        error.textContent = message;
+        error.classList.add('show');
+    }
+
+    function updateStatus(connected, name = '') {
+        document.getElementById('statusText').textContent =
+            connected ? 'Connected' : 'Disconnected';
+
+        document.getElementById('deviceName').textContent =
+            connected ? name : '';
+
+        document.getElementById('connectBtn').textContent =
+            connected ? 'Disconnect' : 'Connect';
+    }
+
+    async function connectBluetooth() {
+        if (device?.gatt?.connected) {
+            device.gatt.disconnect();
+            return;
+        }
+
+        if (!navigator.bluetooth) {
+            showError(
+                'Web Bluetooth is unavailable. Open this page in a supported browser over HTTPS.'
+            );
+            return;
+        }
+
+        try {
+            document.getElementById('errorMsg').classList.remove('show');
+            log('Searching for ESP32...');
+
+            device = await navigator.bluetooth.requestDevice({
+                filters: [{ namePrefix: 'ESP32' }],
+                optionalServices: [
+                    '6e400001-b5a3-f393-e0a9-e50e24dcca9e'
+                ]
+            });
+
+            device.addEventListener('gattserverdisconnected', () => {
+                characteristic = null;
+                updateStatus(false);
+                log('Disconnected');
+            });
+
+            const server = await device.gatt.connect();
+
+            const service = await server.getPrimaryService(
+                '6e400001-b5a3-f393-e0a9-e50e24dcca9e'
+            );
+
+            // UART TX notifies the client; RX usually accepts commands.
+            const tx = await service.getCharacteristic(
+                '6e400003-b5a3-f393-e0a9-e50e24dcca9e'
+            );
+
+            characteristic = tx;
+
+            await tx.startNotifications();
+            tx.addEventListener(
+                'characteristicvaluechanged', handleData
+            );
+
+            updateStatus(true, device.name);
+            log('Connected to ' + device.name);
+
+        } catch (error) {
+            log('Connection failed: ' + error.message);
+            showError('Connection failed: ' + error.message);
+            updateStatus(false);
+        }
+    }
+
+    function handleData(event) {
+        const data = new TextDecoder().decode(
+            event.target.value
+        ).trim();
+
+        log('Received: ' + data);
+
+        try {
+            const json = JSON.parse(data);
+
+            if (json.mq135) {
+                document.getElementById('mq135Value').textContent =
+                    json.mq135.percent ?? '--';
+
+                document.getElementById('mq135Data').innerHTML = '';
+
+                const values = [
+                    ['Raw ADC', json.mq135.raw ?? '--'],
+                    ['Voltage', (json.mq135.voltage ?? '--') + ' V'],
+                    ['Percent', (json.mq135.percent ?? '--') + '%']
+                ];
+
+                for (const [label, value] of values) {
+                    const line = document.createElement('div');
+                    line.textContent = label + ': ' + value;
+                    document.getElementById('mq135Data')
+                        .appendChild(line);
+                }
+            }
+
+            if (json.weight !== undefined) {
+                document.getElementById('hx711Value').textContent =
+                    json.weight == null ? '--' :
+                    Math.round(json.weight);
+            }
+        } catch (error) {
+            // Non-JSON messages remain visible in the console.
+        }
+    }
+
+    async function sendCommand(cmd) {
+        if (!characteristic || !device?.gatt?.connected) {
+            showError('Connect to the ESP32 first.');
+            return;
+        }
+
+        try {
+            // Commands must be written to the ESP32 RX characteristic.
+            const service = await device.gatt
+                .getPrimaryService(
+                    '6e400001-b5a3-f393-e0a9-e50e24dcca9e'
+                );
+
+            const rx = await service.getCharacteristic(
+                '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
+            );
+
+            await rx.writeValue(
+                new TextEncoder().encode(cmd + '\n')
+            );
+
+            log('Sent: ' + cmd);
+        } catch (error) {
+            log('Send failed: ' + error.message);
+            showError('Could not send command: ' + error.message);
+        }
+    }
+
+    document.getElementById('timestamp').textContent =
+        'Last opened: ' + new Date().toLocaleString();
+
+    if (!navigator.bluetooth) {
+        showError(
+            'Web Bluetooth is unavailable in this browser or page context.'
+        );
+    }
+
+    log('Ready to connect');
+</script>
+</body>
+</html>
