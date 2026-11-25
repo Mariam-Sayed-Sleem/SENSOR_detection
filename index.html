@@ -203,6 +203,25 @@
     </section>
 
     <section class="card">
+        <h2>Temperature &amp; Humidity (DHT11)</h2>
+
+        <div class="button-group">
+            <div>
+                <div class="value">
+                    <span id="dhtTemp">--</span>
+                    <span class="unit">°C</span>
+                </div>
+            </div>
+            <div>
+                <div class="value">
+                    <span id="dhtHum">--</span>
+                    <span class="unit">%</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="card">
         <h2>Weight Sensor (HX711)</h2>
 
         <div class="value">
@@ -393,6 +412,13 @@
             if (json.weight !== undefined) {
                 document.getElementById('hx711Value').textContent =
                     json.weight == null ? '--' : Math.round(json.weight);
+            }
+
+            if (json.dht) {
+                document.getElementById('dhtTemp').textContent =
+                    json.dht.temp ?? '--';
+                document.getElementById('dhtHum').textContent =
+                    json.dht.humidity ?? '--';
             }
 
             document.getElementById('timestamp').textContent =
