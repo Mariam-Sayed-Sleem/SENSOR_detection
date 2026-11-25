@@ -155,6 +155,12 @@
             display: block;
         }
 
+        .live {
+            font-size: 12px;
+            color: #d4a574;
+            margin-top: 6px;
+        }
+
         .timestamp {
             text-align: center;
             color: #a68060;
@@ -194,8 +200,6 @@
             Voltage: -- V<br>
             Percent: --%
         </div>
-
-        <button onclick="sendCommand('READ')">Read Sensors</button>
     </section>
 
     <section class="card">
@@ -212,6 +216,7 @@
         </div>
 
         <button onclick="sendCommand('HELP')">Help</button>
+        <div class="live" id="liveStatus">Live updates off</div>
     </section>
 
     <section class="card">
@@ -226,6 +231,14 @@
 <script>
     let characteristic = null;
     let device = null;
+    let pollTimer = null;
+    let waitingForReply = false;
+    let lastRequestTime = 0;
+    const UPDATE_MS = 2000;
+    const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+    const RX_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+    const TX_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+    let rxCharacteristic = null;
 
     function log(message) {
         const output = document.getElementById('console');
@@ -234,7 +247,6 @@
         line.textContent = '> ' + message;
         output.appendChild(line);
 
-        // Keep the console from growing indefinitely.
         while (output.children.length > 50) {
             output.removeChild(output.firstChild);
         }
@@ -250,6 +262,10 @@
         const error = document.getElementById('errorMsg');
         error.textContent = message;
         error.classList.add('show');
+    }
+
+    function setLive(text) {
+        document.getElementById('liveStatus').textContent = text;
     }
 
     function updateStatus(connected, name = '') {
@@ -282,37 +298,30 @@
 
             device = await navigator.bluetooth.requestDevice({
                 filters: [{ namePrefix: 'ESP32' }],
-                optionalServices: [
-                    '6e400001-b5a3-f393-e0a9-e50e24dcca9e'
-                ]
+                optionalServices: [SERVICE_UUID]
             });
 
             device.addEventListener('gattserverdisconnected', () => {
+                stopPolling();
                 characteristic = null;
+                rxCharacteristic = null;
                 updateStatus(false);
                 log('Disconnected');
             });
 
             const server = await device.gatt.connect();
+            const service = await server.getPrimaryService(SERVICE_UUID);
 
-            const service = await server.getPrimaryService(
-                '6e400001-b5a3-f393-e0a9-e50e24dcca9e'
-            );
+            characteristic = await service.getCharacteristic(TX_UUID);
+            rxCharacteristic = await service.getCharacteristic(RX_UUID);
 
-            // UART TX notifies the client; RX usually accepts commands.
-            const tx = await service.getCharacteristic(
-                '6e400003-b5a3-f393-e0a9-e50e24dcca9e'
-            );
-
-            characteristic = tx;
-
-            await tx.startNotifications();
-            tx.addEventListener(
-                'characteristicvaluechanged', handleData
-            );
+            await characteristic.startNotifications();
+            characteristic.addEventListener('characteristicvaluechanged', handleData);
 
             updateStatus(true, device.name);
             log('Connected to ' + device.name);
+
+            startPolling();
 
         } catch (error) {
             log('Connection failed: ' + error.message);
@@ -321,12 +330,42 @@
         }
     }
 
-    function handleData(event) {
-        const data = new TextDecoder().decode(
-            event.target.value
-        ).trim();
+    function startPolling() {
+        stopPolling();
+        pollTimer = setInterval(requestReading, UPDATE_MS);
+        setLive('Live updates every ' + (UPDATE_MS / 1000) + ' s');
+        requestReading();
+    }
 
-        log('Received: ' + data);
+    function stopPolling() {
+        if (pollTimer) {
+            clearInterval(pollTimer);
+        }
+        pollTimer = null;
+        waitingForReply = false;
+        setLive('Live updates off');
+    }
+
+    function requestReading() {
+        if (!rxCharacteristic) return;
+
+        // Don't pile up requests while the ESP32 is still answering the last one.
+        if (waitingForReply && Date.now() - lastRequestTime < 8000) return;
+
+        waitingForReply = true;
+        lastRequestTime = Date.now();
+        sendCommand('READ', true);
+    }
+
+    function handleData(event) {
+        waitingForReply = false;
+
+        const data = new TextDecoder().decode(event.target.value).trim();
+
+        if (!data.startsWith('{')) {
+            log('Received: ' + data);
+            return;
+        }
 
         try {
             const json = JSON.parse(data);
@@ -335,7 +374,8 @@
                 document.getElementById('mq135Value').textContent =
                     json.mq135.percent ?? '--';
 
-                document.getElementById('mq135Data').innerHTML = '';
+                const panel = document.getElementById('mq135Data');
+                panel.innerHTML = '';
 
                 const values = [
                     ['Raw ADC', json.mq135.raw ?? '--'],
@@ -346,56 +386,42 @@
                 for (const [label, value] of values) {
                     const line = document.createElement('div');
                     line.textContent = label + ': ' + value;
-                    document.getElementById('mq135Data')
-                        .appendChild(line);
+                    panel.appendChild(line);
                 }
             }
 
             if (json.weight !== undefined) {
                 document.getElementById('hx711Value').textContent =
-                    json.weight == null ? '--' :
-                    Math.round(json.weight);
+                    json.weight == null ? '--' : Math.round(json.weight);
             }
+
+            document.getElementById('timestamp').textContent =
+                'Last update: ' + new Date().toLocaleTimeString();
+
         } catch (error) {
-            // Non-JSON messages remain visible in the console.
+            log('Bad data: ' + data);
         }
     }
 
-    async function sendCommand(cmd) {
-        if (!characteristic || !device?.gatt?.connected) {
+    async function sendCommand(cmd, silent = false) {
+        if (!rxCharacteristic || !device?.gatt?.connected) {
             showError('Connect to the ESP32 first.');
             return;
         }
 
         try {
-            // Commands must be written to the ESP32 RX characteristic.
-            const service = await device.gatt
-                .getPrimaryService(
-                    '6e400001-b5a3-f393-e0a9-e50e24dcca9e'
-                );
-
-            const rx = await service.getCharacteristic(
-                '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
-            );
-
-            await rx.writeValue(
+            await rxCharacteristic.writeValue(
                 new TextEncoder().encode(cmd + '\n')
             );
 
-            log('Sent: ' + cmd);
+            if (!silent) {
+                log('Sent: ' + cmd);
+            }
         } catch (error) {
+            waitingForReply = false;
             log('Send failed: ' + error.message);
             showError('Could not send command: ' + error.message);
         }
-    }
-
-    document.getElementById('timestamp').textContent =
-        'Last opened: ' + new Date().toLocaleString();
-
-    if (!navigator.bluetooth) {
-        showError(
-            'Web Bluetooth is unavailable in this browser or page context.'
-        );
     }
 
     log('Ready to connect');
